@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Phone client — régie</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+    <h2>Phone client</h2>
+    <video id="localVideo" autoplay playsinline muted></video>
+    <div>
+        <button id="startBtn">Start stream</button>
+    </div>
+
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        let pc;
+        let localStream;
+
+
+        socket.emit('identify', 'phone');
+
+
+        document.getElementById('startBtn').addEventListener('click', async () => {
+            if (!localStream) {
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                    document.getElementById('localVideo').srcObject = localStream;
+                } catch (e) { alert('Erreur getUserMedia: ' + e.message); return; }
+            }
+
+
+            pc = new RTCPeerConnection();
+
+
+            // send local tracks
+            localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
+                    socket.emit('ice-candidate', { targetId: null, candidate: e.candidate });
+                }
+            };
+
+
+            // When dashboard sends an offer back (rare in this flow) handle it via signaling
+
+
+            // Create offer and send to dashboard (server will forward to dashboard socket)
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            // We don't know dashboard id; server will route by target on dashboard side.
+            socket.emit('offer', { targetId: null, sdp: offer });
+
+
+            // Listen for answer from dashboard (proxied)
+            socket.on('answer', async ({ from, sdp }) => {
+                try {
+                    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+                } catch (e) { console.error(e); }
+            });
+
+
+            socket.on('ice-candidate', async ({ from, candidate }) => {
+                try { await pc.addIceCandidate(candidate); } catch (e) { console.warn(e); }
+            });
+
+
+            alert('Offer sent to dashboard (via signaling).');
+        });
+    </script>
+</body>
+
+</html>
