@@ -1,76 +1,150 @@
 <!doctype html>
-triggerReplay();
-}
-requestAnimationFrame(loop);
-}
-loop();
-}
-
-
-function triggerReplay() {
-const blob = getBufferedBlob();
-if (!blob || blob.size === 0) { console.warn('no buffer'); return; }
-const url = URL.createObjectURL(blob);
-const v = document.createElement('video');
-v.src = url;
-v.controls = false;
-v.autoplay = true;
-v.style.position = 'fixed';
-v.style.right = '10px';
-v.style.bottom = '10px';
-v.style.width = '40%';
-v.style.zIndex = 9999;
-document.body.appendChild(v);
-// remove after playing
-v.onended = () => { document.body.removeChild(v); URL.revokeObjectURL(url); };
-}
-
-
-// When a phone joins, create an RTCPeerConnection and wait for offer
-socket.on('phone-joined', ({ phoneId }) => {
-console.log('phone joined', phoneId);
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Regie 24h Prototype</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <h2>Dashboard</h2>
+    <div id="phonesContainer"></div>
+    <div>
+        <h3>Main Video</h3>
+        <video id="mainVideo" autoplay playsinline controls></video>
+    </div>
+    <button id="replayBtn">Replay Last 10s</button>
+    <script>
+const socket = io();
+const pcs = {};
+const remoteStreams = {};
+socket.emit('identify', 'dashboard');
+const mainVideo = document.getElementById('mainVideo');
+const phonesContainer = document.getElementById('phonesContainer');
+document.getElementById('replayBtn').addEventListener('click', () => {
+    triggerReplay();
 });
 
+socket.on('phone-joined', ({ phoneId }) => {
+    console.log('phone joined', phoneId);
+});
 
 // This server proxies offers from phones to dashboard; we receive an 'offer' event
 socket.on('offer', async ({ from, sdp }) => {
-console.log('offer from', from);
-const pc = new RTCPeerConnection();
-pcs[from] = pc;
+    console.log('offer from', from);
+    const pc = new RTCPeerConnection();
+    pcs[from] = pc;
 
+    pc.ontrack = (ev) => {
+        console.log('ontrack', from, ev.streams);
+        const stream = ev.streams[0];
+        remoteStreams[from] = stream;
+        attachMiniStream(from, stream);
+        // If this becomes main video, set srcObject
+    };
 
-pc.ontrack = (ev) => {
-console.log('ontrack', from, ev.streams);
-const stream = ev.streams[0];
-remoteStreams[from] = stream;
-attachMiniStream(from, stream);
-// If this becomes main video, set srcObject
-};
+    pc.onicecandidate = (e) => {
+        if (e.candidate) {
+            socket.emit('ice-candidate', { targetId: from, candidate: e.candidate });
+        }
+    };
 
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('answer', { targetId: from, sdp: pc.localDescription });
 
-pc.onicecandidate = (e) => {
-if (e.candidate) {
-socket.emit('ice-candidate', { targetId: from, candidate: e.candidate });
-}
-};
-
-
-await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-const answer = await pc.createAnswer();
-await pc.setLocalDescription(answer);
-socket.emit('answer', { targetId: from, sdp: pc.localDescription });
-
-
-// Listen for ICE candidates from server
-socket.on('ice-candidate', async ({ from: sender, candidate }) => {
-if (sender === from) {
-try { await pc.addIceCandidate(candidate); } catch(e){ console.warn(e); }
-}
+    // Listen for ICE candidates from server (scoped to this peer)
+    socket.on('ice-candidate', async ({ from: sender, candidate }) => {
+        if (sender === from) {
+            try { await pc.addIceCandidate(candidate); } catch(e){ console.warn(e); }
+        }
+    });
 });
-});
-
 
 socket.on('phone-left', ({ phoneId }) => {
-console.log('phone left', phoneId);
-// remove UI
-const el = document.getElementById(
+    console.log('phone left', phoneId);
+    // remove UI
+    const el = document.getElementById('phone-' + phoneId);
+    if (el) el.parentNode.removeChild(el);
+    // close peer connection
+    if (pcs[phoneId]) {
+        pcs[phoneId].close();
+        delete pcs[phoneId];
+    }
+    delete remoteStreams[phoneId];
+});
+
+function attachMiniStream(phoneId, stream) {
+    let el = document.getElementById('phone-' + phoneId);
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'phone-' + phoneId;
+        const title = document.createElement('h4');
+        title.textContent = 'Phone ' + phoneId;
+        el.appendChild(title);
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        video.style.width = '200px';
+        video.style.border = '1px solid black';
+        el.appendChild(video);
+        const selectBtn = document.createElement('button');
+        selectBtn.textContent = 'Set as Main Video';
+        selectBtn.addEventListener('click', () => {
+            mainVideo.srcObject = stream;
+        });
+        el.appendChild(selectBtn);
+        phonesContainer.appendChild(el);
+    }
+    const videoEl = el.querySelector('video');
+    videoEl.srcObject = stream;
+}
+
+// Buffering for replay
+const BUFFER_TIME = 10; // seconds
+let recordedBlobs = [];
+try {
+    const mediaStream = mainVideo.captureStream();
+    const mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'video/webm; codecs=vp8,opus' });
+
+    mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+            recordedBlobs.push({ time: Date.now(), blob: event.data });
+            // Remove old blobs
+            const cutoff = Date.now() - BUFFER_TIME * 1000;
+            recordedBlobs = recordedBlobs.filter(item => item.time >= cutoff);
+        }
+    };
+    mediaRecorder.start(1000); // collect 1s blobs
+} catch (e) {
+    console.warn('MediaRecorder/captureStream not available or failed:', e);
+}
+
+function getBufferedBlob() {
+    if (recordedBlobs.length === 0) return null;
+    const blobs = recordedBlobs.map(item => item.blob);
+    return new Blob(blobs, { type: 'video/webm' });
+}
+function triggerReplay() {
+    const blob = getBufferedBlob();
+    if (!blob || blob.size === 0) { console.warn('no buffer'); return; }
+    const url = URL.createObjectURL(blob);
+    const v = document.createElement('video');
+    v.src = url;
+    v.controls = false;
+    v.autoplay = true;
+    v.style.position = 'fixed';
+    v.style.right = '10px';
+    v.style.bottom = '10px';
+    v.style.width = '40%';
+    v.style.zIndex = 9999;
+    document.body.appendChild(v);
+    // remove after playing
+    v.onended = () => { document.body.removeChild(v); URL.revokeObjectURL(url); };
+}
+    </script>
+</body>
+</html>
